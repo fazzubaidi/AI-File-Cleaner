@@ -1,4 +1,9 @@
-"""AI explanations and cleanup recommendations (offline fallback included)."""
+"""AI explanations, recommendations, and importance — with offline fallback.
+
+v3: explanations must include WHY (evidence from name, folder, age,
+duplicate status), and the model also returns an importance rating.
+Responses are cached; only names/paths/sizes/dates are ever sent.
+"""
 from __future__ import annotations
 
 import json
@@ -12,54 +17,63 @@ from config import (AI_BATCH_SIZE, AI_CACHE_FILE, AI_MAX_TOKENS,
 from scanner import FileInfo
 
 _EXTENSION_HINTS: dict[str, str] = {
-    ".exe": "Windows program installer or application. Safe to delete if you already installed it or no longer use it.",
-    ".msi": "Windows installer package. Usually safe to delete after the program is installed.",
-    ".dmg": "macOS disk image installer. Safe to delete once the app is installed.",
-    ".zip": "Compressed archive. Safe to delete if you already extracted its contents.",
-    ".rar": "Compressed archive. Safe to delete if you already extracted its contents.",
-    ".7z": "Compressed archive. Safe to delete if you already extracted its contents.",
-    ".iso": "Disc image, often an OS or software installer. Large; safe to delete if no longer needed.",
-    ".pdf": "PDF document - could be a receipt, manual, ticket, or report. Check before deleting.",
-    ".docx": "Word document. Review it before deleting - may contain your own writing.",
-    ".xlsx": "Excel spreadsheet. Review before deleting - may contain your own data.",
-    ".pptx": "PowerPoint presentation. Review before deleting.",
-    ".txt": "Plain text file, often notes or logs. Quick to review before deleting.",
-    ".csv": "Spreadsheet data export. Often a one-time download; usually safe to delete.",
-    ".jpg": "Photo or image. Review before deleting - could be a personal photo.",
-    ".jpeg": "Photo or image. Review before deleting - could be a personal photo.",
-    ".png": "Image, often a screenshot or downloaded graphic. Screenshots are usually safe to delete.",
-    ".gif": "Animated image, usually downloaded from the web. Generally safe to delete.",
-    ".heic": "iPhone photo. Review before deleting - likely a personal photo.",
-    ".mp4": "Video file. Could be personal or downloaded; review before deleting.",
-    ".mov": "Video file, often from a phone camera. Review before deleting.",
-    ".mp3": "Audio file. Safe to delete if you stream your music.",
-    ".wav": "Uncompressed audio, often a recording. Review before deleting.",
-    ".tmp": "Temporary file left behind by a program. Almost always safe to delete.",
-    ".log": "Program log file used for troubleshooting. Almost always safe to delete.",
-    ".bak": "Backup copy of another file. Safe to delete if the original is intact.",
-    ".crdownload": "Incomplete Chrome download. Safe to delete.",
-    ".part": "Incomplete download. Safe to delete.",
-    ".torrent": "Torrent metadata file. Safe to delete once the download finished.",
-    ".apk": "Android app installer. Safe to delete if already installed.",
-    ".json": "Structured data file used by programs or exports. Usually safe if you don't recognize it.",
-    ".html": "Saved web page. Usually safe to delete.",
-    ".ics": "Calendar invite file. Safe to delete after the event was added.",
-    ".vcf": "Contact card file. Safe to delete after the contact was imported.",
+    ".exe": "a Windows program installer or application",
+    ".msi": "a Windows installer package",
+    ".dmg": "a macOS disk image installer",
+    ".zip": "a compressed archive",
+    ".rar": "a compressed archive",
+    ".7z": "a compressed archive",
+    ".iso": "a disc image, often an OS or software installer",
+    ".pdf": "a PDF document — receipt, manual, ticket, or report",
+    ".docx": "a Word document",
+    ".xlsx": "an Excel spreadsheet",
+    ".pptx": "a PowerPoint presentation",
+    ".txt": "a plain text file, often notes or logs",
+    ".csv": "a spreadsheet data export",
+    ".jpg": "a photo or image", ".jpeg": "a photo or image",
+    ".png": "an image, often a screenshot or downloaded graphic",
+    ".gif": "an animated image from the web",
+    ".heic": "an iPhone photo",
+    ".mp4": "a video file", ".mov": "a video, often from a phone camera",
+    ".mp3": "an audio file", ".wav": "an uncompressed audio recording",
+    ".tmp": "a temporary file left behind by a program",
+    ".log": "a program log file used for troubleshooting",
+    ".bak": "a backup copy of another file",
+    ".crdownload": "an incomplete Chrome download",
+    ".part": "an incomplete download",
+    ".torrent": "a torrent metadata file",
+    ".apk": "an Android app installer",
+    ".json": "a structured data file used by programs",
+    ".html": "a saved web page",
+    ".py": "a Python source file",
+    ".ics": "a calendar invite file",
+    ".vcf": "a contact card file",
 }
-
-_DEFAULT_HINT = "Unrecognized file type. Check the file name and folder for clues before deleting."
 
 
 def _fallback_explanation(info: FileInfo) -> str:
-    base = _EXTENSION_HINTS.get(info.extension, _DEFAULT_HINT)
+    """Offline explanation that always states its evidence (the WHY)."""
+    what = _EXTENSION_HINTS.get(info.extension,
+                                "an unrecognized file type")
+    evidence = [f"the '{info.extension or 'no'}' extension"]
+    folder = info.path.parent.name.lower()
+    if folder:
+        evidence.append(f"its location in '{info.path.parent.name}'")
+    evidence.append(f"{info.days_idle} days without use")
+    base = (f"This appears to be {what}, based on {evidence[0]}, "
+            f"{evidence[1]}, and {evidence[2]}.")
     if info.dup_group and not info.is_dup_keeper:
-        base = f"Exact duplicate of another file (group #{info.dup_group}). " + base
+        base += (f" It is also a byte-identical copy of another file "
+                 f"(duplicate group #{info.dup_group}).")
     elif info.similar_group:
-        base = f"{info.similar_label} (similar group #{info.similar_group}). " + base
+        base += (f" Its name pattern suggests it is one of several versions "
+                 f"of the same document ({info.similar_label.lower()}).")
     return base
 
 
 class AICache:
+    """Persistent name|size|mtime -> {explanation, recommendation, ...}."""
+
     def __init__(self):
         self._data: dict[str, dict] = load_json(AI_CACHE_FILE, {})
         self._dirty = False
@@ -92,14 +106,19 @@ def _get_client():
 
 
 _SYSTEM_PROMPT = (
-    "You help a user clean up old files. For each file you receive (name, "
-    "extension, path, size, days idle, duplicate status), respond with a "
-    "JSON object mapping each file's id to an object with keys: "
-    "'explanation' (one plain-English sentence about what the file likely "
-    "is), 'recommendation' (exactly one of: "
+    "You help a user clean up and organize old files. For each file "
+    "(name, extension, path, size, days idle, duplicate status), respond "
+    "with a JSON object mapping each file's id to an object with keys: "
+    "'explanation' (one or two sentences saying what the file likely is "
+    "AND WHY — cite the specific evidence: filename words, extension, "
+    "folder, age, duplicate status; e.g. 'This appears to be a resume "
+    "because the filename contains Resume and it is a Word document in "
+    "Downloads'), 'recommendation' (exactly one of: "
     + ", ".join(f"'{lvl}'" for lvl in RECOMMENDATION_LEVELS) +
-    "), and 'reason' (one sentence of reasoning). Never claim certainty "
-    "about personal documents. Respond ONLY with the JSON object."
+    "), 'reason' (one sentence), and 'importance' (integer 1-5, where "
+    "5=critical personal/legal/financial document, 3=normal, "
+    "1=disposable temp/installer). Never claim certainty about personal "
+    "documents. Respond ONLY with the JSON object."
 )
 
 
@@ -128,10 +147,7 @@ def _analyze_batch_with_api(client, batch: list[FileInfo]) -> dict[int, dict]:
     parsed = json.loads(match.group(0) if match else text)
     out: dict[int, dict] = {}
     for k, v in parsed.items():
-        if isinstance(v, dict):
-            out[int(k)] = v
-        else:
-            out[int(k)] = {"explanation": str(v)}
+        out[int(k)] = v if isinstance(v, dict) else {"explanation": str(v)}
     return out
 
 
@@ -140,10 +156,11 @@ def analyze_files(
     progress: Optional[Callable[[str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> None:
+    """Fill .explanation and refine recommendation/importance in place."""
     client = _get_client()
     cache = AICache()
     if client is None and progress:
-        progress("No API key found - using built-in offline explanations.")
+        progress("No API key found — using built-in offline explanations.")
 
     pending = []
     for info in files:
@@ -158,7 +175,7 @@ def analyze_files(
             break
         batch = pending[start:start + AI_BATCH_SIZE]
         if progress:
-            progress(f"AI analysis {start + 1}-{start + len(batch)} of {len(pending)}...")
+            progress(f"AI analysis {start + 1}–{start + len(batch)} of {len(pending)}...")
 
         entries: dict[int, dict] = {}
         if client is not None:
@@ -183,3 +200,6 @@ def _apply_entry(info: FileInfo, entry: dict) -> None:
         info.recommendation = level
         if entry.get("reason"):
             info.rec_reason = str(entry["reason"])
+    imp = entry.get("importance")
+    if isinstance(imp, int) and 1 <= imp <= 5:
+        info.importance = imp

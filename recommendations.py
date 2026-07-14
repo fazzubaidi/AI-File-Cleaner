@@ -1,22 +1,19 @@
-"""Rule-based cleanup recommendations and file health scores.
-
-These rules always run (offline mode). When a Claude API key is present,
-ai_analyzer.py can override the recommendation with model reasoning.
-
-Recommendation levels (config.RECOMMENDATION_LEVELS):
-  Safe to Delete / Duplicate / Temporary / Installer / Probably Safe /
-  Archive Candidate / Review Recommended / Important
-"""
+"""Rule-based recommendations, health scores, and importance ratings."""
 from __future__ import annotations
 
-from config import (ARCHIVE_CANDIDATE_DAYS, IMPORTANT_KEYWORDS,
-                    LARGE_FILE_MB)
+from config import (ARCHIVE_CANDIDATE_DAYS, IMPORTANCE_LABELS,
+                    IMPORTANT_KEYWORDS, LARGE_FILE_MB)
 from scanner import FileInfo
 
 _TEMP_EXTS = {".tmp", ".log", ".bak", ".crdownload", ".part", ".old"}
 _INSTALLER_EXTS = {".exe", ".msi", ".dmg", ".pkg", ".apk", ".iso"}
 _ARCHIVE_EXTS = {".zip", ".rar", ".7z", ".tar", ".gz"}
 _PERSONAL_CATS = {"Documents", "Images", "Video", "Audio"}
+
+_CRITICAL_WORDS = ["tax", "passport", "resume", "cv", "legal", "will",
+                   "deed", "contract", "insurance", "license", "certificate"]
+_IMPORTANT_WORDS = ["project", "homework", "assignment", "report",
+                    "research", "thesis", "essay", "presentation"]
 
 
 def _in_downloads(info: FileInfo) -> bool:
@@ -91,8 +88,33 @@ def health_score(info: FileInfo) -> tuple[int, str]:
     return score, "; ".join(reasons)
 
 
+def importance(info: FileInfo) -> tuple[int, str]:
+    """1–5 star rating: 5=Critical, 1=Disposable."""
+    name = f"{info.name} {info.path.parent}".lower()
+    if any(w in name for w in _CRITICAL_WORDS):
+        word = next(w for w in _CRITICAL_WORDS if w in name)
+        return 5, f"Critical: matches '{word}' — likely a legal, financial, or identity document."
+    if any(w in name for w in _IMPORTANT_WORDS):
+        word = next(w for w in _IMPORTANT_WORDS if w in name)
+        return 4, f"Important: matches '{word}' — likely school or work output."
+    if info.extension in _TEMP_EXTS or info.extension in _INSTALLER_EXTS:
+        return 1, "Disposable: temporary file or installer, replaceable at any time."
+    if info.dup_group and not info.is_dup_keeper:
+        return 1, "Disposable: exact duplicate of another file."
+    if info.category in ("Images", "Video", "Audio", "Documents"):
+        return 3, f"Normal: personal {info.category.lower()} content."
+    if info.category == "Other":
+        return 2, "Low: unrecognized file type with no importance signals."
+    return 2, f"Low: {info.category.lower()} file with no importance signals."
+
+
 def apply_rules(files: list[FileInfo]) -> None:
-    """Fill recommendation, reasoning, and health score for every file."""
+    """Fill recommendation, health, and importance for every file."""
     for f in files:
         f.recommendation, f.rec_reason = recommend(f)
         f.health, f.health_reason = health_score(f)
+        f.importance, f.importance_reason = importance(f)
+
+
+def importance_label(stars: int) -> str:
+    return IMPORTANCE_LABELS.get(stars, "Normal")

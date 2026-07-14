@@ -1,12 +1,14 @@
-"""Duplicate and similar-file detection.
+"""Multi-level duplicate and similar-file detection.
 
-Exact duplicates: files are first grouped by size (cheap), then only
-size-collision groups are SHA-256 hashed on a thread pool. Hashes are
-cached in ~/.ai_file_cleaner/hash_cache.json keyed by path|size|mtime,
-so unchanged files are never re-hashed across runs.
+Level 1 — Exact: identical SHA-256 (size-first, thread-pool hashing, cached)
+Level 2 — Same name: identical filename in different folders
+Level 3 — Near name: version families (Report.pdf / Report (1).pdf / ...)
+Level 4 — Identical images: exact-hash groups that are image files
+Level 5 — Similar documents: same normalized name stem, same extension,
+          sizes within 25% (heuristic — contents are never uploaded)
 
-Similar files: filename normalization plus fuzzy stem matching finds
-version families like "Report.pdf" / "Report (1).pdf" / "Report-final.pdf".
+Hashes are cached in ~/.ai_file_cleaner/hash_cache.json keyed by
+path|size|mtime, so unchanged files are never re-hashed across runs.
 """
 from __future__ import annotations
 
@@ -21,10 +23,12 @@ from typing import Callable, Optional
 from config import HASH_CACHE_FILE, HASH_WORKERS, load_json, save_json
 from scanner import FileInfo
 
-_CHUNK = 1 << 20  # 1 MB read chunks
+_CHUNK = 1 << 20
+_IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".heic", ".webp",
+               ".tiff", ".raw"}
+_DOC_EXTS = {".pdf", ".docx", ".doc", ".txt", ".rtf", ".odt", ".pptx",
+             ".xlsx", ".md"}
 
-
-# ---------------------------------------------------------------- hashing
 
 class HashCache:
     """Persistent path|size|mtime -> sha256 cache."""
@@ -51,7 +55,6 @@ class HashCache:
 
 
 def sha256_file(info: FileInfo, cache: Optional[HashCache] = None) -> Optional[str]:
-    """Hash one file, using/updating the cache. None on read failure."""
     if cache:
         cached = cache.get(info)
         if cached:
@@ -69,12 +72,11 @@ def sha256_file(info: FileInfo, cache: Optional[HashCache] = None) -> Optional[s
     return digest
 
 
-# ---------------------------------------------------------------- duplicates
-
 @dataclass
 class DuplicateGroup:
     group_id: int
-    sha256: str
+    sha256: str = ""
+    level: str = "Exact"           # Exact | Same name | Near name | Identical images | Similar documents
     files: list[FileInfo] = field(default_factory=list)
 
     @property
@@ -93,17 +95,15 @@ def find_duplicates(
     progress: Optional[Callable[[str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> list[DuplicateGroup]:
-    """Find exact duplicates. Tags each FileInfo in place and returns groups."""
+    """Level 1: exact SHA-256 duplicates. Tags FileInfo in place."""
     cache = cache or HashCache()
 
-    # Pass 1: size buckets — only same-size files can be identical.
     by_size: dict[int, list[FileInfo]] = defaultdict(list)
     for f in files:
         if f.size_bytes > 0:
             by_size[f.size_bytes].append(f)
     candidates = [f for group in by_size.values() if len(group) > 1 for f in group]
 
-    # Pass 2: hash candidates on a thread pool.
     if progress and candidates:
         progress(f"Hashing {len(candidates)} size-collision file(s)...")
     if not (cancel_check and cancel_check()) and candidates:
@@ -113,7 +113,6 @@ def find_duplicates(
             f.sha256 = digest
     cache.save()
 
-    # Pass 3: group by digest.
     by_hash: dict[str, list[FileInfo]] = defaultdict(list)
     for f in candidates:
         if f.sha256:
@@ -123,18 +122,74 @@ def find_duplicates(
     for digest, members in by_hash.items():
         if len(members) < 2:
             continue
-        group = DuplicateGroup(group_id=len(groups) + 1, sha256=digest, files=members)
+        all_images = all(m.extension in _IMAGE_EXTS for m in members)
+        group = DuplicateGroup(
+            group_id=len(groups) + 1, sha256=digest,
+            level="Identical images" if all_images else "Exact",
+            files=members)
         keeper = group.keeper
         for f in members:
             f.dup_group = group.group_id
             f.is_dup_keeper = f is keeper
+            f.dup_level = group.level
         groups.append(group)
 
     groups.sort(key=lambda g: g.wasted_bytes, reverse=True)
     return groups
 
 
-# ---------------------------------------------------------------- similar
+def find_extended_duplicates(files: list[FileInfo],
+                             exact: list[DuplicateGroup]) -> list[DuplicateGroup]:
+    """Levels 2, 3, 5 — name-based groups among files NOT already exact dups."""
+    next_id = len(exact) + 1
+    in_exact = {id(f) for g in exact for f in g.files}
+    rest = [f for f in files if id(f) not in in_exact]
+    groups: list[DuplicateGroup] = []
+
+    # Level 2: identical filename, different folders.
+    by_name: dict[str, list[FileInfo]] = defaultdict(list)
+    for f in rest:
+        by_name[f.name.lower()].append(f)
+    used: set[int] = set()
+    for name, members in by_name.items():
+        if len(members) > 1:
+            g = DuplicateGroup(group_id=next_id, level="Same name", files=members)
+            next_id += 1
+            groups.append(g)
+            used.update(id(m) for m in members)
+
+    # Levels 3 & 5: version families by normalized stem + extension.
+    # Exact-dup members may appear as context, but a group only forms when
+    # it adds at least one file that is not already an exact duplicate.
+    by_stem: dict[tuple[str, str], list[FileInfo]] = defaultdict(list)
+    for f in files:
+        if id(f) in used:
+            continue
+        stem = normalize_stem(f.name)
+        if stem:
+            by_stem[(stem, f.extension)].append(f)
+    for (stem, ext), members in by_stem.items():
+        fresh = [m for m in members if id(m) not in in_exact]
+        if len(members) < 2 or not fresh:
+            continue
+        sizes = [m.size_bytes for m in members]
+        close_sizes = max(sizes) <= min(sizes) * 1.25 if min(sizes) else False
+        level = ("Similar documents"
+                 if ext in _DOC_EXTS and close_sizes else "Near name")
+        g = DuplicateGroup(group_id=next_id, level=level, files=members)
+        next_id += 1
+        groups.append(g)
+
+    for g in groups:
+        keeper = g.keeper
+        for f in g.files:
+            if f.dup_group is None:
+                f.dup_group = g.group_id
+                f.is_dup_keeper = f is keeper
+                f.dup_level = g.level
+    groups.sort(key=lambda g: g.wasted_bytes, reverse=True)
+    return groups
+
 
 _VERSION_TOKENS = re.compile(
     r"(\s*\(\d+\)|\s*-\s*copy(\s*\(\d+\))?|[_\-\s]*(copy|final|draft|new|old|"
@@ -153,14 +208,12 @@ def normalize_stem(name: str) -> str:
 @dataclass
 class SimilarGroup:
     group_id: int
-    label: str                      # "Multiple versions" | "Possible duplicate"
+    label: str
     files: list[FileInfo] = field(default_factory=list)
 
 
 def find_similar(files: list[FileInfo], threshold: float = 0.86) -> list[SimilarGroup]:
-    """Group likely versions of the same document. Tags FileInfo in place."""
-    # Bucket by (normalized stem, extension); merge near-identical stems
-    # within the same extension using fuzzy matching.
+    """Group likely versions of the same document (legacy API, still used)."""
     buckets: dict[tuple[str, str], list[FileInfo]] = defaultdict(list)
     for f in files:
         stem = normalize_stem(f.name)

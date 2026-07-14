@@ -1,6 +1,8 @@
-# AI File Cleaner
+# AI File Cleaner — Organization Assistant (v3)
 
-A desktop app that finds files you haven't touched in 30+ days, detects exact and near-duplicate files, scores every file's "health," explains each file in plain English via the Claude API, and lets you delete, quarantine, archive, or organize only the files you check — with a full analytics dashboard, cleanup history, and undo.
+A desktop app that understands, organizes, and cleans your files — not just describes them. It finds stale files, detects duplicates at five levels, groups everything into smart life categories, recommends where each file belongs, scores folder health, rates file importance, answers questions in a chat panel, and lets you clean up with previews, confirmations, and undo at every step.
+
+> Screenshot placeholders: `docs/screenshot-dashboard.png`, `docs/screenshot-files.png`, `docs/screenshot-organize.png`, `docs/screenshot-chat.png`
 
 ## Setup
 
@@ -10,17 +12,14 @@ Requires Python 3.10+ (tkinter ships with the standard installer).
 pip install -r requirements.txt
 ```
 
-Optional but recommended — enable AI explanations and recommendations by setting your Anthropic API key:
+Optional — set your Anthropic API key for richer AI explanations, recommendations, and chat answers. Everything still works offline without it:
 
 ```bash
 # Windows (PowerShell)
 $env:ANTHROPIC_API_KEY = "sk-ant-..."
-
 # macOS / Linux
 export ANTHROPIC_API_KEY="sk-ant-..."
 ```
-
-Without a key, the app falls back to a built-in rule engine and extension dictionary, so every feature still works offline.
 
 ## Run
 
@@ -29,78 +28,80 @@ python main.py               # GUI
 python main.py --scheduled   # headless scan for Task Scheduler / cron
 ```
 
-## Feature guide
+## What's in the window
 
-### Scanning
-Press **Scan** to check Downloads, Documents, and Desktop, or **Choose Folder…** first. The "Unused ≥ N days" spinner sets the staleness cutoff (a file is stale only when *both* its access and modification times exceed it). Folders scan concurrently on a thread pool; **Cancel** stops mid-scan. Permission-locked files are skipped, never crashed on.
+**Toolbar** — folder picker, staleness cutoff, Scan (F5) / Cancel (Esc), the natural-language search bar, the ⚡ Actions menu, and filter Presets. Active filters appear as chips underneath; click a chip to clear it.
 
-### Duplicate detection (Duplicates tab)
-Files are grouped by size first, and only size collisions get SHA-256 hashed (on a thread pool, with hashes cached in `~/.ai_file_cleaner/hash_cache.json` so unchanged files are never re-hashed). Each group shows the **Original** (earliest-modified copy), its **Duplicates**, and the wasted bytes. **Check all duplicates (keep originals)** selects every extra copy in one click.
+### 📊 Dashboard (Feature 1 & 9)
+Cards for files/folders/storage scanned, unused 30+/90+/1-year+ counts, estimated cleanup size, duplicates and their wasted bytes, empty folders, largest file and folder — plus per-type cards (Images, PDFs, Word, Excel, Videos, Audio, Code, Archives, Unknown), storage-by-extension and storage-by-category charts, the top-10 largest files, and oldest/newest/most-duplicated summaries.
 
-### Similar file detection
-Filename normalization plus fuzzy matching groups version families like `Report.pdf` / `Report (1).pdf` / `Report-final.pdf` or `Resume_v2.docx` / `Resume_v3.docx`, labeled **Multiple versions** or **Possible duplicate**. Filter to them with the **Similar** checkbox.
+### 🗂 Files (Features 2, 6, 7)
+Every stale file with size, dates, **Importance stars** (★★★★★ Critical → ★ Disposable), health score, recommendation, and an AI explanation that always states its evidence ("This appears to be a resume **because** the filename contains Resume and it is a Word document in Downloads"). Toggle **Group by category** to collapse the list into School 🎓, Programming 💻, Finance 💰, Work 💼, Personal 🪪, Pictures 🖼, Videos 🎬, Music 🎵, Documents 📄, Downloads ⬇, Archives 📦, and Other ❓. Critical files render in red. Click any column to sort (importance included). Right-click for open/exclude actions.
 
-### Dashboard tab
-Cards show files/storage scanned, stale files, duplicate files, space wasted by duplicates, reclaimable space, and the largest file and folder. Below: bar charts of storage by extension and by category, plus the top 10 largest files.
+### ♊ Duplicates (Feature 4)
+Five detection levels, each labeled per group: **Exact** (SHA-256, size-first with cached hashes), **Identical images** (exact-hash image groups), **Same name** (identical filename in different folders), **Near name** (`Resume.pdf` / `Resume (1).pdf` / `Resume FINAL.pdf`), and **Similar documents** (same name stem + extension with close sizes — contents never leave your machine). Check individual copies, or use "Check all duplicates (keep originals)" which only auto-selects byte-identical extras.
 
-### AI recommendations & health score
-Every file gets a recommendation — **Safe to Delete, Probably Safe, Review Recommended, Important, Duplicate, Temporary, Installer, Archive Candidate** — based on age, access/modification times, extension, folder, duplicate status, and filename patterns (files named like `tax`, `resume`, `invoice` are flagged **Important**). Every file also gets a 0–100 **Health** score (high = keep, low = excellent deletion candidate). Click a row to see the full path, the reasoning, and the health factors. With an API key, Claude refines the recommendation and explanation; responses are cached in `ai_cache.json`.
+### 🧭 Organize (Feature 3)
+Every file that would be better off elsewhere gets: Current Location → **Suggested Folder**, a reason, and a color-coded **Confidence** score (green ≥80%). Nothing ever moves automatically: check rows (or "Select all ≥80%"), **Preview Changes**, **Apply Changes**, and **Undo** the whole batch afterwards. Moves are recorded in Cleanup History.
 
-### Smart filtering
-Combine the search bar with the filter row (category, recommendation, extension, min size, Dups / Similar / >100MB / Old 1y+) — all filters AND together. The **Presets** menu includes **Downloads cleanup** (installers, temp files, duplicates, downloaded archives), **Large files only**, and **Duplicates only**. Click any column header to sort; click again to reverse.
+### 🩺 Folders (Feature 5)
+Each folder scores 0–100 with findings ("112 unused files", "26 duplicates", "mixed content") and a recommendation. Red < 50, amber < 80, green healthy.
 
-### Exclusion rules
-**Tools → Exclusion Rules…** lets you exclude folders (path fragments like `Documents/School`), extensions (`.py`, `.docx`), and keywords (`resume`, `tax`). Rules support **Import/Export** as JSON and are stored in `~/.ai_file_cleaner/exclusions.json`. Right-click any row → **Exclude this folder from scans** for a one-click rule.
+### 📅 Timeline (Feature 11)
+Browse stale files by Year → Month, newest first.
 
-### Deleting — three modes
+### 🤖 AI Chat (Feature 12)
+A side panel (Ctrl+J) that answers from the **existing scan** — no rescans: "What can I safely delete?", "Show duplicate resumes", "Which folders are the messiest?", "How much space can I recover?", "Files I haven't opened in 5 years". Offline it uses intent matching plus the search engine; with an API key, unmatched questions go to Claude with a compact stats summary (never file contents).
 
-| Mode | What happens | Undo |
-|---|---|---|
-| Recycle Bin | `send2trash` to the OS bin | Restore manually from the OS Recycle Bin |
-| Quarantine | Moved to `~/.ai_file_cleaner/quarantine/` | **Undo Last Cleanup** / restore from History |
-| Permanent | Removed immediately | None — irreversible |
+### 🔎 Natural-language search (Feature 8)
+Type queries like `old resumes`, `python projects`, `college homework`, `vacation pictures`, `unused PDFs`, `largest videos` — parsed into category/extension/age/size constraints with synonym and plural handling.
 
-Every deletion first opens the **Cleanup Simulator**: files removed, storage recovered, duplicates removed, and what remains — nothing is touched until you confirm.
+### ⚡ One-click actions (Feature 10)
+Delete empty folders · Delete screenshots older than 2 years · Clear temp files & old installers · Archive files unused for 1 year+ · Organize Downloads · Move resumes together. **Every action shows a full preview list and requires confirmation** before anything happens, then flows through history/undo like manual cleanups.
 
-### Undo & cleanup history
-**Tools → Cleanup History…** lists every cleanup (timestamp, mode, file count, size recovered, duplicates removed) with per-file detail, **Export CSV**, and **Restore Selected Cleanup** for quarantine records. **Undo Last Cleanup** (footer button or Tools menu) restores the most recent quarantine batch. History lives in `~/.ai_file_cleaner/history.json`.
+## Deleting, archiving, undo (Feature 15 — safety)
 
-### Archive instead of delete
-**Archive Selected** compresses checked files into a ZIP (folder structure preserved below their common root, destination of your choice), then sends the originals to the Recycle Bin — only files that made it into the archive are removed.
+Three delete modes (footer): **Recycle Bin** (OS bin), **Quarantine** (in-app undo), **Permanent** (irreversible, explicit). Every destructive action runs the **Cleanup Simulator** first. **Undo Last** (Ctrl+Z) restores the latest quarantine batch or organization move batch. Tools → Cleanup History shows every batch with CSV export and per-batch restore. All actions are logged to `~/.ai_file_cleaner/app.log`.
 
-### Automatic organization
-**Tools → Organize Files…** plans moves by **category** (AI-detected type), **extension**, **year**, **month**, or **project** (shared name stems). The full move list is previewed; nothing moves until you press **Apply Moves**. Name collisions get `(1)`, `(2)` suffixes.
+## Keyboard shortcuts
 
-### Scheduled scans
-**Tools → Scheduled Scans…** — daily, weekly, or monthly, silent or not, with alerts when reclaimable space exceeds X GB or duplicates exceed X files. Scheduled scans run while the app is open. For fully unattended runs, schedule `python main.py --scheduled` with Windows Task Scheduler or cron.
+F5 scan · Esc cancel · Ctrl+F search · Ctrl+A select all visible · Delete delete selected · Ctrl+Z undo · Ctrl+D dark mode · Ctrl+J chat panel
 
-### Interface
-Light/dark mode (**View → Dark Mode**, remembered between sessions), sortable columns, right-click context menu (open file, open folder, toggle, exclude folder), live search, progress bar, status bar, and responsive resizing.
+## Performance (Feature 14)
 
-## Module layout
+Concurrent folder traversal, thread-pool hashing with a persistent hash cache, cached AI responses, background AI analysis, cancelable scans, and incremental row rendering (250 rows per tick) so the UI never freezes. Window size, dark mode, and grouping preference persist between sessions.
+
+## Module layout (Feature 16)
 
 | File | Responsibility |
 |---|---|
 | `main.py` | Entry point; `--scheduled` headless mode |
-| `config.py` | Settings, app-data paths, file taxonomy, tunables |
-| `scanner.py` | Threaded traversal, stale detection, storage stats |
-| `duplicates.py` | SHA-256 duplicates (cached), similar-file grouping |
+| `config.py` | Settings, paths, taxonomy, type buckets, tunables |
+| `scanner.py` | Threaded traversal, stale detection, full statistics |
+| `duplicates.py` | 5-level duplicate detection + hash cache |
+| `categorizer.py` | Smart life-category classification |
+| `recommendations.py` | Recommendations, health scores, importance stars |
+| `org_advisor.py` | Suggested folders with reasons and confidence |
+| `folder_health.py` | Per-folder 0–100 health scoring |
+| `search_engine.py` | Natural-language search parsing and matching |
+| `quick_actions.py` | One-click action planning (preview-first) |
+| `chat_assistant.py` | Scan-aware chat (offline intents + optional Claude) |
+| `ai_analyzer.py` | Claude analysis w/ evidence-based fallback + cache |
 | `analytics.py` | Dashboard statistics and cleanup simulation |
-| `recommendations.py` | Rule-based recommendations and health scores |
-| `ai_analyzer.py` | Claude API analysis with offline fallback and cache |
-| `filters.py` | Combinable smart filters and presets |
+| `filters.py` | Combinable filters and presets |
 | `exclusions.py` | Exclusion rules with JSON import/export |
-| `file_actions.py` | Trash / quarantine / permanent delete, restore, ZIP archive |
-| `history.py` | Cleanup history, CSV export, undo records |
-| `organizer.py` | Move planning and execution |
-| `scheduler.py` | Schedule storage, due checks, notifications |
-| `theme.py` | Light/dark ttk palettes |
-| `dialogs.py` | Exclusions, history, scheduler, organizer, simulator windows |
-| `gui.py` | Main window, tabs, threading, all user actions |
+| `file_actions.py` | Trash/quarantine/permanent delete, restore, ZIP |
+| `history.py` | Cleanup + move history, CSV export, undo records |
+| `organizer.py` | Manual organize-by-scheme dialog backend |
+| `scheduler.py` | Scheduled scans and threshold notifications |
+| `applog.py` | Application logging |
+| `theme.py` | Light/dark palettes + v3 widget styles |
+| `dialogs.py` | Exclusions/history/scheduler/organizer/preview windows |
+| `gui.py` | Main window, tabs, chat panel, threading |
 
-## Privacy & safety notes
+## Privacy & safety
 
-- Only file **names, paths, sizes, and dates** are sent to the Claude API — never file contents. Offline mode sends nothing anywhere.
-- All app data (settings, caches, history, quarantine) stays in `~/.ai_file_cleaner/` on your machine.
-- Scans cap at 5,000 stale files per run (`MAX_FILES_PER_SCAN` in `config.py`).
-- The legacy `scan_folders()` and `delete_files(paths, use_trash=...)` APIs still work, so any scripts built on v1 keep running.
+- Only file **names, paths, sizes, dates, and aggregate stats** ever go to the API — never file contents. Offline mode sends nothing anywhere.
+- Nothing is deleted or moved without a preview and confirmation; undo covers quarantine deletions and organization moves.
+- App data lives in `~/.ai_file_cleaner/`; scans cap at 5,000 stale files (`MAX_FILES_PER_SCAN`).
+- The v1/v2 APIs (`scan_folders()`, `delete_files(paths, use_trash=...)`) still work.

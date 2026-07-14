@@ -34,6 +34,7 @@ EXCLUSIONS_FILE = APP_DIR / "exclusions.json"
 HISTORY_FILE = APP_DIR / "history.json"
 HASH_CACHE_FILE = APP_DIR / "hash_cache.json"
 AI_CACHE_FILE = APP_DIR / "ai_cache.json"
+LOG_FILE = APP_DIR / "app.log"
 QUARANTINE_DIR = APP_DIR / "quarantine"
 
 
@@ -62,6 +63,8 @@ def save_json(path: Path, data) -> bool:
 DEFAULT_SETTINGS = {
     "dark_mode": False,
     "delete_mode": "trash",
+    "window_geometry": "",
+    "group_by_category": False,
     "schedule": {
         "frequency": "none",
         "silent": True,
@@ -103,6 +106,7 @@ EXTENSION_CATEGORIES: dict[str, str] = {
     ".pkg": "Installers", ".apk": "Installers", ".iso": "Installers",
     ".py": "Code", ".js": "Code", ".ts": "Code", ".html": "Code",
     ".css": "Code", ".cpp": "Code", ".c": "Code", ".java": "Code",
+    ".ipynb": "Code", ".sh": "Code", ".bat": "Code",
     ".json": "Data", ".xml": "Data", ".yaml": "Data", ".yml": "Data",
     ".sql": "Data", ".db": "Data",
     ".tmp": "Temporary", ".log": "Temporary", ".bak": "Temporary",
@@ -111,6 +115,20 @@ EXTENSION_CATEGORIES: dict[str, str] = {
 }
 
 FILE_CATEGORIES = sorted(set(EXTENSION_CATEGORIES.values()) | {"Other"})
+
+# Extension buckets for the dashboard type cards.
+TYPE_BUCKETS = {
+    "Images": {".jpg", ".jpeg", ".png", ".gif", ".bmp", ".heic", ".webp",
+               ".svg", ".tiff", ".raw"},
+    "PDFs": {".pdf"},
+    "Word docs": {".docx", ".doc", ".rtf", ".odt"},
+    "Excel files": {".xlsx", ".xls", ".csv"},
+    "Videos": {".mp4", ".mov", ".avi", ".mkv", ".wmv", ".webm"},
+    "Audio": {".mp3", ".wav", ".flac", ".m4a", ".ogg"},
+    "Code files": {".py", ".js", ".ts", ".html", ".css", ".cpp", ".c",
+                   ".java", ".ipynb", ".sh", ".bat"},
+    "Archives": {".zip", ".rar", ".7z", ".tar", ".gz"},
+}
 
 
 def category_for(extension: str) -> str:
@@ -127,3 +145,7 @@ IMPORTANT_KEYWORDS = [
     "license", "certificate", "diploma", "insurance", "will", "deed",
     "important", "backup",
 ]
+
+# Importance stars: 5=Critical ... 1=Disposable
+IMPORTANCE_LABELS = {5: "Critical", 4: "Important", 3: "Normal",
+                     2: "Low", 1: "Disposable"}

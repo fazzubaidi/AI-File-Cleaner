@@ -301,3 +301,32 @@ def show_simulator(parent, selected: list[FileInfo], stats: DashboardStats,
     )
     return messagebox.askyesno("Cleanup Simulator", text, icon="warning",
                                parent=parent)
+
+
+class PreviewDialog(_Modal):
+    """Generic 'preview before executing' list. Confirms via callback."""
+
+    def __init__(self, parent, title: str, description: str,
+                 columns: list, rows: list, on_confirm):
+        super().__init__(parent, title, "720x460")
+        self._on_confirm = on_confirm
+        ttk.Label(self, text=description, wraplength=680,
+                  padding=(10, 8)).pack(fill="x")
+        self.tree = ttk.Treeview(self, columns=[c[0] for c in columns],
+                                 show="headings")
+        for key, heading, width in columns:
+            self.tree.heading(key, text=heading)
+            self.tree.column(key, width=width, stretch=True)
+        for row in rows[:2000]:
+            self.tree.insert("", "end", values=row)
+        self.tree.pack(fill="both", expand=True, padx=10)
+        btns = ttk.Frame(self, padding=10)
+        btns.pack(fill="x")
+        ttk.Button(btns, text=f"Confirm ({len(rows)})",
+                   command=self._confirm).pack(side="right")
+        ttk.Button(btns, text="Cancel",
+                   command=self.destroy).pack(side="right", padx=6)
+
+    def _confirm(self) -> None:
+        self.destroy()
+        self._on_confirm()

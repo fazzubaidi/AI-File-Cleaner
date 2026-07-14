@@ -65,3 +65,18 @@ def apply_theme(root: tk.Tk, dark: bool) -> dict:
     style.configure("Status.TLabel", background=pal["surface"],
                     foreground=pal["muted"], relief="sunken", padding=(10, 2))
     return pal
+
+
+def extend_theme(style_root, pal) -> None:
+    """Extra styles for v3 widgets: chips, badges, chat panel."""
+    import tkinter as tk
+    from tkinter import ttk
+    style = ttk.Style(style_root)
+    style.configure("Chip.TButton", padding=(8, 1), font=("Segoe UI", 8))
+    style.configure("Badge.TLabel", background=pal["select"],
+                    foreground=pal["text"], padding=(6, 1),
+                    font=("Segoe UI", 8, "bold"))
+    style.configure("Ok.Badge.TLabel", foreground=pal["ok"])
+    style.configure("Warn.Badge.TLabel", foreground=pal["warn"])
+    style.configure("Danger.Badge.TLabel", foreground=pal["danger"])
+    style.configure("Chat.TFrame", background=pal["surface"])

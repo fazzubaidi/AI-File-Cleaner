@@ -1,4 +1,8 @@
-"""Find stale files and gather storage statistics."""
+"""Find stale files and gather storage statistics.
+
+v3 additions: folder counts, empty folders, unused-age buckets,
+oldest/newest tracking, and smart-organization fields on FileInfo.
+"""
 from __future__ import annotations
 
 import heapq
@@ -18,20 +22,31 @@ from config import (MAX_FILES_PER_SCAN, SCAN_WORKERS, SKIP_DIR_NAMES,
 
 @dataclass
 class FileInfo:
+    """Everything the GUI and the AI need to know about one file."""
     path: Path
     size_bytes: int
     last_accessed: datetime
     last_modified: datetime
     explanation: str = field(default="Analyzing...")
+    # duplicates / similar
     sha256: Optional[str] = None
     dup_group: Optional[int] = None
     is_dup_keeper: bool = False
+    dup_level: str = ""            # "Exact", "Same name", "Near name", ...
     similar_group: Optional[int] = None
     similar_label: str = ""
+    # assessment
     recommendation: str = ""
     rec_reason: str = ""
     health: int = 50
     health_reason: str = ""
+    importance: int = 3            # 1-5 stars
+    importance_reason: str = ""
+    # smart organization
+    smart_category: str = ""       # School / Programming / Finance / ...
+    suggested_folder: str = ""     # e.g. "Documents/Career"
+    suggest_reason: str = ""
+    confidence: int = 0            # 0-100
 
     @property
     def name(self) -> str:
@@ -54,33 +69,60 @@ class FileInfo:
         newest = max(self.last_accessed, self.last_modified)
         return (datetime.now() - newest).days
 
+    @property
+    def stars(self) -> str:
+        return "★" * self.importance
+
 
 @dataclass
 class RawScanStats:
+    """Whole-tree numbers accumulated during the walk (thread-safe via lock)."""
     total_files: int = 0
     total_bytes: int = 0
+    total_dirs: int = 0
+    empty_dirs: list = field(default_factory=list)
+    unused_30: int = 0
+    unused_90: int = 0
+    unused_365: int = 0
     ext_bytes: Counter = field(default_factory=Counter)
     ext_count: Counter = field(default_factory=Counter)
     cat_bytes: Counter = field(default_factory=Counter)
     folder_bytes: Counter = field(default_factory=Counter)
-    top_files: list = field(default_factory=list)
+    folder_files: Counter = field(default_factory=Counter)
+    top_files: list = field(default_factory=list)     # heap (size, path)
+    oldest: list = field(default_factory=list)        # heap (-mtime, path)
+    newest: list = field(default_factory=list)        # heap (mtime, path)
 
-    def add(self, path: Path, size: int) -> None:
+    def add(self, path: Path, size: int, idle_days: int, mtime: float) -> None:
         ext = path.suffix.lower() or "(none)"
         self.total_files += 1
         self.total_bytes += size
         self.ext_bytes[ext] += size
         self.ext_count[ext] += 1
         self.cat_bytes[category_for(ext)] += size
-        self.folder_bytes[str(path.parent)] += size
-        entry = (size, str(path))
-        if len(self.top_files) < 10:
-            heapq.heappush(self.top_files, entry)
-        elif entry > self.top_files[0]:
-            heapq.heapreplace(self.top_files, entry)
+        folder = str(path.parent)
+        self.folder_bytes[folder] += size
+        self.folder_files[folder] += 1
+        if idle_days >= 365:
+            self.unused_365 += 1
+        if idle_days >= 90:
+            self.unused_90 += 1
+        if idle_days >= 30:
+            self.unused_30 += 1
+        _push_top(self.top_files, (size, str(path)), 10)
+        _push_top(self.oldest, (-mtime, str(path)), 5)
+        _push_top(self.newest, (mtime, str(path)), 5)
+
+
+def _push_top(heap: list, entry: tuple, cap: int) -> None:
+    if len(heap) < cap:
+        heapq.heappush(heap, entry)
+    elif entry > heap[0]:
+        heapq.heapreplace(heap, entry)
 
 
 def human_size(num_bytes: float) -> str:
+    """Format a byte count like '4.2 MB'."""
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if num_bytes < 1024 or unit == "TB":
             return f"{num_bytes:.1f} {unit}" if unit != "B" else f"{int(num_bytes)} B"
@@ -95,7 +137,12 @@ def scan_with_stats(
     cancel_check: Optional[Callable[[], bool]] = None,
     is_excluded: Optional[Callable[[Path], bool]] = None,
 ) -> tuple[list[FileInfo], RawScanStats]:
+    """Scan all folders concurrently.
+
+    Returns (stale files sorted largest-first, whole-tree statistics).
+    """
     cutoff = time.time() - min_age_days * 86400
+    now = time.time()
     stats = RawScanStats()
     results: list[FileInfo] = []
     lock = threading.Lock()
@@ -112,15 +159,20 @@ def scan_with_stats(
             ]
             if progress:
                 progress(f"Scanning {root}")
+            with lock:
+                stats.total_dirs += 1
+                if not files and not dirs and root_path not in [Path(f) for f in folders]:
+                    stats.empty_dirs.append(str(root_path))
             for fname in files:
                 fpath = root_path / fname
                 if is_excluded and is_excluded(fpath):
                     continue
-                stale, size = _stat_file(fpath, cutoff)
-                if size < 0:
+                stale, size, st = _stat_file(fpath, cutoff)
+                if size < 0 or st is None:
                     continue
+                idle = int((now - max(st.st_atime, st.st_mtime)) / 86400)
                 with lock:
-                    stats.add(fpath, size)
+                    stats.add(fpath, size, idle, st.st_mtime)
                     if stale and len(results) < MAX_FILES_PER_SCAN:
                         results.append(stale)
 
@@ -138,24 +190,26 @@ def scan_folders(
     progress: Optional[Callable[[str], None]] = None,
     cancel_check: Optional[Callable[[], bool]] = None,
 ) -> list[FileInfo]:
+    """Backwards-compatible wrapper: stale files only, largest first."""
     stale, _ = scan_with_stats(folders, min_age_days, progress, cancel_check)
     return stale
 
 
-def _stat_file(fpath: Path, cutoff: float) -> tuple[Optional[FileInfo], int]:
+def _stat_file(fpath: Path, cutoff: float):
+    """Stat one file. Returns (FileInfo-if-stale, size or -1, stat or None)."""
     try:
         if fpath.is_symlink():
-            return None, -1
+            return None, -1, None
         st = fpath.stat()
     except (PermissionError, OSError):
-        return None, -1
+        return None, -1, None
 
     if st.st_atime >= cutoff or st.st_mtime >= cutoff:
-        return None, st.st_size
+        return None, st.st_size, st
 
     return FileInfo(
         path=fpath,
         size_bytes=st.st_size,
         last_accessed=datetime.fromtimestamp(st.st_atime),
         last_modified=datetime.fromtimestamp(st.st_mtime),
-    ), st.st_size
+    ), st.st_size, st

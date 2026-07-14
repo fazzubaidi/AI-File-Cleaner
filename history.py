@@ -59,9 +59,9 @@ def mark_restored(timestamp: str, paths: Optional[set[str]] = None) -> None:
 
 
 def last_undoable() -> Optional[dict]:
-    """Most recent quarantine cleanup that hasn't been fully restored."""
+    """Most recent quarantine or move batch that hasn't been restored."""
     for rec in reversed(load_history()):
-        if rec.get("mode") == "quarantine" and not rec.get("restored"):
+        if rec.get("mode") in ("quarantine", "move") and not rec.get("restored"):
             return rec
     return None
 
